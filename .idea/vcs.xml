@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/深度之眼transformer/代码transfomer/attention-is-all-you-need-pytorch" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/深度之眼transformer/代码transfomer/pytorch-transformer" vcs="Git" />
+  </component>
+</project>
