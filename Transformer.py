@@ -6,6 +6,12 @@ import math
 from torch.autograd import Variable
 import numpy as np
 
+
+
+'''
+整体的x维度: [batch, max_len, d_model], 一直保持不变
+'''
+
 def make_model(src_vocab, tgt_vocab, N=6, d_model=512, d_ff=2048, h=8, dropout=0.1):
     c = copy.deepcopy  # 深拷贝，修改互不影响
     attn = MultiHeadedAttention(h, d_model)      #  attn实例化  返回(512, 512)
@@ -16,13 +22,12 @@ def make_model(src_vocab, tgt_vocab, N=6, d_model=512, d_ff=2048, h=8, dropout=0
     model = EncoderDecoder(
         Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),   # encoder模型实例化
         Decoder(DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout), N),   # decoder实例化
-        nn.Sequential(Embeddings(d_model, src_vocab),   # 将src_vocab转化为d_model, 返回[d_model, d_model]
-                      c(position)),    # encoder输入:embedding+position_embedding
-        nn.Sequential(Embeddings(d_model, tgt_vocab),    # 将tgt_vocab转化为d_model, 返回[d_model, d_model]
-                      c(position)),   # decoder输入：embedding+position_embedding
+        nn.Sequential(Embeddings(d_model, src_vocab), c(position)),   # encoder输入: input_embed + position_embed
+        nn.Sequential(Embeddings(d_model, tgt_vocab), c(position)),   # decoder输入：input_embed + position_embed
         Generator(d_model, tgt_vocab)   # linear+softmax来输出: d_model -> vocab
     )
 
+    # 参数初始化
     for p in model.parameters():
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)
@@ -34,8 +39,8 @@ class EncoderDecoder(nn.Module):
         super(EncoderDecoder, self).__init__()
         self.encoder = encoder       # encoder部分
         self.decoder = decoder       # decoder部分
-        self.src_embed = src_embed   # encoder中将输入src转化为embedding + position
-        self.tgt_embed = tgt_embed   # decoder中将输入tgt转化为embedding + position
+        self.src_embed = src_embed   # encoder中将输入src转化为input_embed + position_embed
+        self.tgt_embed = tgt_embed   # decoder中将输入tgt转化为input_embed + position_embed
         self.generator = generator   # linear+softmax来模型输出：d_model -> vocab
 
     def encode(self, src, src_mask):
@@ -70,9 +75,10 @@ class Encoder(nn.Module):
     def __init__(self, encoderlayer, N):
         super(Encoder, self).__init__()
         self.layers = clones(encoderlayer, N)
-        self.norm = LayerNorm(encoderlayer.size)
+        self.norm = LayerNorm(encoderlayer.d_model)
 
     def forward(self, x, mask):
+        # [batch, max_len, d_model]
         for layer in self.layers:
             x = layer(x, mask)
         return self.norm(x)   # 最后做一个LayerNorm
@@ -102,7 +108,7 @@ class SublayerConnection(nn.Module):
         return x + self.dropout(sublayer(self.norm(x)))
 
 
-# encoder后的norm
+# 小trick，每经过一层encoder和decoder后都会有一定的偏差，不容易收敛，因此需要加入layernorm
 class LayerNorm(nn.Module):
     def __init__(self, features, eps=1e-6):
         super(LayerNorm, self).__init__()
@@ -120,7 +126,7 @@ class Decoder(nn.Module):
     def __init__(self, decoderlayer, N):
         super(Decoder, self).__init__()
         self.layers = clones(decoderlayer, N)
-        self.norm = LayerNorm(decoderlayer.size)
+        self.norm = LayerNorm(decoderlayer.d_model)
 
     def forward(self, memory, x, src_mask, tgt_mask):
         for layer in self.layers:
@@ -169,12 +175,11 @@ class PositionalEncoding(nn.Module):
 
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0., max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0., d_model, 2) *
-                             -(math.log(10000.0,)/d_model))
+        div_term = torch.exp(torch.arange(0., d_model, 2) *-(math.log(10000.0,)/d_model))
         pe[:, 0::2] = torch.sin(position*div_term)
         pe[:, 1::2] = torch.cos(position*div_term)
         pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+        self.register_buffer('pe', pe)   # 序列化
 
     def forward(self, x):
         x = x + Variable(self.pe[:, :x.size(1)], requires_grad=False)
@@ -195,6 +200,8 @@ class PositionwiseFeedForward(nn.Module):
         return self.w_2(self.dropout(F.relu(self.w_w1(x))))
 
 
+# scale dot-product
+# attention(Q, K, V) = softmax(Q*K.T/sqrt(d_k))*V
 def attention(query, key, value, mask=None, dropout=None):
     # query=key=value---->[batch_size,8,max_length,64]
 
@@ -222,7 +229,7 @@ class MultiHeadedAttention(nn.Module):
         # We assume d_v always equals d_k
         self.d_k = d_model // h
         self.h = h
-        self.linears = clones(nn.Linear(d_model, d_model), 4)
+        self.linears = clones(nn.Linear(d_model, d_model), 4)   # 4层linears
         self.attn = None
         self.dropout = nn.Dropout(p=dropout)
 
@@ -239,10 +246,11 @@ class MultiHeadedAttention(nn.Module):
         # shape:Wq=Wk=Wv----->[512,512]
         # 第二步：将获得的Q、K、V在第三个纬度上进行切分
         # shape:[batch_size,max_length,8,64]
-        # 第三部：填充到第一个纬度
+        # 第三部：填充到第一个纬度, 维度交换
         # shape:[batch_size,8,max_length,64]
         query, key, value = [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
                              for l, x in zip(self.linears, (query, key, value))]
+                                            # q*wq, k*wk, v*wv  self.linears调用了3层
 
         # 进入到attention之后纬度不变，shape:[batch_size,8,max_length,64]
         x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
@@ -252,6 +260,40 @@ class MultiHeadedAttention(nn.Module):
         # 纬度还原：[batch_size,max_length,512]
         x = x.transpose(1, 2).contiguous().view(nbatches, -1, self.h * self.d_k)
         # 最后与WO大矩阵相乘 shape:[512,512]
-        return self.linears[-1](x)
+        return self.linears[-1](x)   #调用第四层linear
 
 
+# Mask机制
+# Transformer 模型里面涉及两种mask，padding mask 和 sequence mask。
+# padding mask 在所有的 scaled dot-product attention 里面都需要用到，
+# 而 sequence mask 只有在 decoder 的 self-attention 里面用到。
+#
+# Padding Mask
+# 因为每个批次输入序列长度是不一样的也就是说，我们要对输入序列进行对齐。
+# 具体来说，就是给在较短的序列后面填充 0。但是如果输入的序列太长，则是截取左边的内容，把多余的直接舍弃。
+# 因为这些填充的位置，其实是没什么意义的，所以我们的attention机制不应该把注意力放在这些位置上，所以我们需要进行一些处理。
+# 具体的做法是，把这些位置的值加上一个非常大的负数(负无穷)，这样的话，经过 softmax，这些位置的概率就会接近0！
+# 而我们的 padding mask 实际上是一个张量，每个值都是一个Boolean，值为 false 的地方就是我们要进行处理的地方。
+#
+# Sequence mask
+# 文章前面也提到，sequence mask 是为了使得 decoder 不能看见未来的信息。也就是对于一个序列，
+# 在 time_step 为 t 的时刻，我们的解码输出应该只能依赖于 t 时刻之前的输出，而不能依赖 t 之后的输出。
+# 因此我们需要想一个办法，把 t 之后的信息给隐藏起来。 那么具体怎么做呢？也很简单：产生一个上三角矩阵，上三角的值全为0。
+# 把这个矩阵作用在每一个序列上，就可以达到我们的目的。
+#
+# 对于 decoder 的 self-attention，里面使用到的 scaled dot-product attention，同时需要padding mask 和
+# sequence mask 作为 attn_mask，具体实现就是两个mask相加作为attn_mask。
+# 其他情况，attn_mask 一律等于 padding mask。
+
+
+
+### 解码过程
+# Decoder的最后一个部分是过一个linear layer将decoder的输出扩展到与vocabulary size一样的维度上。
+# 经过softmax 后，选择概率最高的一个word作为预测结果。在做预测时，步骤如下：
+# （1）给 decoder 输入 encoder 对整个句子 embedding 的结果 和一个特殊的开始符号 。
+#  decoder 将产生预测，在我们的例子中应该是 ”I”。 　　
+# （2）给 decoder 输入 encoder 的 embedding 结果和 “I”，在这一步 decoder预测 “am”。
+# （3）给 decoder 输入 encoder 的 embedding 结果和 “I am”，在这一步 decoder预测 “a”。
+# （4）给 decoder 输入 encoder 的 embedding 结果和 “I am a”，在这一步 decoder预测 “student”。
+# （5）给 decoder 输入 encoder 的 embedding 结果和 “I am a student”, decoder应该输出 ”。”
+# （6）然后 decoder 生成了 ，翻译完成。
