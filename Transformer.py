@@ -8,7 +8,7 @@ import numpy as np
 
 
 
-'''
+''' 
 整体的x维度: [batch, max_len, d_model], 一直保持不变
 '''
 
