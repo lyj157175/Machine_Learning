@@ -1,3 +1,9 @@
-# Transformer
-利用PyTorch对Transformer原论文Attention is all you need进行复现，同时也包括Transformer模型的深入解读
+# Machine Learning
+机器学习算法python实现，持续更新中。。。
+
+包括感知机，K-近邻，决策树，朴素贝叶斯，逻辑回归
+
+
+
+
 
